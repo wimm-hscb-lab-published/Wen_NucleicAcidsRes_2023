@@ -1,0 +1,1827 @@
+head(z1)
+results$pval[which(results$pval==0)] <- 0.001
+# Definition#
+    data <- results#
+    x <- data$ligand_receptor_cluster_final#
+    y <- data$id_cp_interaction_cell.group#
+    z1 <- -log10(data$pval)#
+    z2 <- data$MeanLR
+fivenum(z1)
+# Load packages#
+library(data.table)#
+library(SingCellaR)#
+library(plyr)#
+library(textclean)#
+#
+############################################################
+#################### CHECK INPUT FILES #####################
+############################################################
+#
+# Read count file#
+path <- "/Users/seanwen/Documents/Eleni/Run_May2021/cellphonedb/input/example_data/"#
+file <- "test_counts.txt"#
+df <- as.data.frame(fread(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE))#
+#
+df[1:5,1:5]#
+#
+# Read metadata file#
+path <- "/Users/seanwen/Documents/Eleni/Run_May2021/cellphonedb/input/example_data/"#
+file <- "test_meta.txt"#
+df.pheno <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE)#
+#
+head(df.pheno)#
+#
+# Check values#
+fivenum(df[,2]) # Normalised AND log2-transformed#
+fivenum(df[,3])#
+#
+############################################################
+################### PREPARE INPUT FILES ####################
+############################################################
+#
+# Read R object#
+path <- "/Users/seanwen/Documents/Eleni/Run_May2021/r object/"#
+file <- "DIAGNOSIS.Harmony_clusters_tsne.SingCellaR.rdata"#
+load(file=paste(path, file, sep=""))#
+object <- human_HSPCs#
+object#
+#
+# Prepare sample metadata#
+    # Retrieve sample metadata#
+    df.pheno <- object@meta.data#
+#
+    # Subset samples passing QC#
+    table(df.pheno$IsPassed)#
+    df.pheno <- df.pheno[which(df.pheno$IsPassed==TRUE), ]#
+    # Subset relevant patient group#
+    table(df.pheno$sampleID, df.pheno$status)#
+    df.pheno <- df.pheno[which(df.pheno$status %in% c("JMMLDxrelapse")), ]#
+    # Annotate cluster info#
+    df.cluster <- object@sc.clusters#
+    df.pheno <- join(df.pheno, df.cluster[,c("Cell", "louvain_cluster")], by="Cell", type="left")#
+    # Annotate cell type#
+        # Read file#
+        path <- "/Users/seanwen/Documents/Eleni/Run_May2021/r object/"#
+        file <- "ONLYDX_CLUSTERS_MERGE.SingCellaR_ClusterInfoEdited.txt"#
+        md <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE)#
+        # Annotate#
+        df.pheno <- join(df.pheno, md, by="louvain_cluster", type="left")#
+        sum(is.na(df.pheno$cell_type_anno_merged))#
+    # Subset relevant columns#
+    df.pheno <- df.pheno[,c("Cell", "cell_type_anno_merged")]#
+    names(df.pheno)[which(names(df.pheno)=="cell_type_anno_merged")] <- "cell_type"#
+    # Save file#
+    path <- "/Users/seanwen/Documents/Eleni/Run_May2021/cellphonedb/input/jmml_relapse/"#
+    file <- "object_metadata.txt"#
+    write.table(df.pheno, paste(path, file, sep=""), sep="\t", col.names=TRUE, row.names=FALSE, quote=FALSE)#
+#
+# Create gene name-gene id reference table#
+    # Read 10x GTF#
+    path <- "/Users/seanwen/Documents/U2AF1_2019/GTF/"#
+    file <- "refdata-cellranger-GRCh38-3.0.0.gtf"#
+    gtf <- as.data.frame(fread(paste(path, file, sep=""), sep="\t", header=FALSE, stringsAsFactors=FALSE))#
+    # Subest gene records#
+    gtf <- gtf[which(gtf$V3=="gene"), ]#
+    # Retrieve selected attributes#
+        # Parse attribute column#
+        attr <- strsplit(gtf$V9, split=";")#
+        # gene_id#
+        . <- sapply(attr, function(x) grep("gene_id", x, value=TRUE))#
+        gtf$gene_id <- mgsub(., c("gene_id", " ", "\""), "")#
+        # gene name#
+        . <- sapply(attr, function(x) grep("gene_name", x, value=TRUE))#
+        gtf$gene_name <- mgsub(., c("gene_name", " ", "\""), "")#
+    # Subset relevant columns#
+    gtf <- unique(gtf[,c("gene_id", "gene_name")])#
+    # Remove gene names with multiple gene ids#
+    tbl <- as.data.frame(table(gtf$gene_name))#
+    gene_names.dup <- as.character(tbl[which(tbl$Freq >=2), 1])#
+    gtf <- gtf[-which(gtf$gene_name %in% gene_names.dup), ]#
+# Prepare count matrix#
+    # Subset matrix#
+    df <- get_normalized_umi(object)#
+    # Match gene name to gene id#
+        # Retrieve overlapping genes#
+        gene_names <- unique(intersect(row.names(df), gtf$gene_name))#
+        head(gene_names)#
+        # Subset overlaps#
+        gtf <- gtf[which(gtf$gene_name %in% gene_names), ]#
+        df <- df[gtf$gene_name, ]#
+        table(row.names(df)==gtf$gene_name)#
+        # Replace gene name with gene id#
+        row.names(df) <- gtf$gene_id#
+        table(row.names(df)==gtf$gene_id)#
+#
+    # Convert to data frame#
+    df <- as.data.frame(as.matrix(df))#
+    # Check values#
+    fivenum(df[,2])#
+    fivenum(df[,3]) # Not yet log2-transformed#
+    # log2 transform#
+    df <- log2(df + 1)#
+    # Subset overlapping samples#
+    df <- df[, df.pheno$Cell]#
+    table(names(df)==df.pheno$Cell)#
+    # Create gene id column#
+    . <- data.frame("Gene"=row.names(df), stringsAsFactors=FALSE)#
+    df <- cbind.data.frame(., df)#
+    row.names(df) <- NULL#
+    # Save file#
+    path <- "/Users/seanwen/Documents/Eleni/Run_May2021/cellphonedb/input/jmml_relapse/"#
+    file <- "object_counts.txt"#
+    write.table(df, paste(path, file, sep=""), sep="\t", col.names=TRUE, row.names=FALSE, quote=FALSE)
+# Load packages#
+library(data.table)#
+library(SingCellaR)#
+library(plyr)#
+library(textclean)#
+#
+############################################################
+#################### CHECK INPUT FILES #####################
+############################################################
+#
+# Read count file#
+path <- "/Users/seanwen/Documents/Eleni/Run_May2021/cellphonedb/input/example_data/"#
+file <- "test_counts.txt"#
+df <- as.data.frame(fread(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE))#
+#
+df[1:5,1:5]#
+#
+# Read metadata file#
+path <- "/Users/seanwen/Documents/Eleni/Run_May2021/cellphonedb/input/example_data/"#
+file <- "test_meta.txt"#
+df.pheno <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE)#
+#
+head(df.pheno)#
+#
+# Check values#
+fivenum(df[,2]) # Normalised AND log2-transformed#
+fivenum(df[,3])#
+#
+############################################################
+################### PREPARE INPUT FILES ####################
+############################################################
+#
+# Read R object#
+path <- "/Users/seanwen/Documents/Eleni/Run_May2021/r object/"#
+file <- "ONLYDX_CLUSTERS_MERGE.SingCellaR_ClusterInfoEdited.rdata"#
+load(file=paste(path, file, sep=""))#
+object <- human_HSPCs#
+object#
+#
+# Prepare sample metadata#
+    # Retrieve sample metadata#
+    df.pheno <- object@meta.data#
+#
+    # Subset samples passing QC#
+    table(df.pheno$IsPassed)#
+    df.pheno <- df.pheno[which(df.pheno$IsPassed==TRUE), ]#
+    # Subset relevant patient group#
+    table(df.pheno$sampleID, df.pheno$status)#
+    df.pheno <- df.pheno[which(df.pheno$status %in% c("JMMLDx")), ]#
+    # Annotate cluster info#
+    df.cluster <- object@sc.clusters#
+    df.pheno <- join(df.pheno, df.cluster[,c("Cell", "louvain_cluster")], by="Cell", type="left")#
+    # Annotate cell type#
+        # Read file#
+        path <- "/Users/seanwen/Documents/Eleni/Run_May2021/r object/"#
+        file <- "ONLYDX_CLUSTERS_MERGE.SingCellaR_ClusterInfoEdited.txt"#
+        md <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE)#
+        # Annotate#
+        df.pheno <- join(df.pheno, md, by="louvain_cluster", type="left")#
+        sum(is.na(df.pheno$cell_type_anno_merged))#
+    # Subset relevant columns#
+    df.pheno <- df.pheno[,c("Cell", "cell_type_anno_merged")]#
+    names(df.pheno)[which(names(df.pheno)=="cell_type_anno_merged")] <- "cell_type"#
+    # Save file#
+    path <- "/Users/seanwen/Documents/Eleni/Run_May2021/cellphonedb/input/jmml_non_relapse/"#
+    file <- "object_metadata.txt"#
+    write.table(df.pheno, paste(path, file, sep=""), sep="\t", col.names=TRUE, row.names=FALSE, quote=FALSE)#
+#
+# Create gene name-gene id reference table#
+    # Read 10x GTF#
+    path <- "/Users/seanwen/Documents/U2AF1_2019/GTF/"#
+    file <- "refdata-cellranger-GRCh38-3.0.0.gtf"#
+    gtf <- as.data.frame(fread(paste(path, file, sep=""), sep="\t", header=FALSE, stringsAsFactors=FALSE))#
+    # Subest gene records#
+    gtf <- gtf[which(gtf$V3=="gene"), ]#
+    # Retrieve selected attributes#
+        # Parse attribute column#
+        attr <- strsplit(gtf$V9, split=";")#
+        # gene_id#
+        . <- sapply(attr, function(x) grep("gene_id", x, value=TRUE))#
+        gtf$gene_id <- mgsub(., c("gene_id", " ", "\""), "")#
+        # gene name#
+        . <- sapply(attr, function(x) grep("gene_name", x, value=TRUE))#
+        gtf$gene_name <- mgsub(., c("gene_name", " ", "\""), "")#
+    # Subset relevant columns#
+    gtf <- unique(gtf[,c("gene_id", "gene_name")])#
+    # Remove gene names with multiple gene ids#
+    tbl <- as.data.frame(table(gtf$gene_name))#
+    gene_names.dup <- as.character(tbl[which(tbl$Freq >=2), 1])#
+    gtf <- gtf[-which(gtf$gene_name %in% gene_names.dup), ]#
+# Prepare count matrix#
+    # Subset matrix#
+    df <- get_normalized_umi(object)#
+    # Match gene name to gene id#
+        # Retrieve overlapping genes#
+        gene_names <- unique(intersect(row.names(df), gtf$gene_name))#
+        head(gene_names)#
+        # Subset overlaps#
+        gtf <- gtf[which(gtf$gene_name %in% gene_names), ]#
+        df <- df[gtf$gene_name, ]#
+        table(row.names(df)==gtf$gene_name)#
+        # Replace gene name with gene id#
+        row.names(df) <- gtf$gene_id#
+        table(row.names(df)==gtf$gene_id)#
+#
+    # Convert to data frame#
+    df <- as.data.frame(as.matrix(df))#
+    # Check values#
+    fivenum(df[,2])#
+    fivenum(df[,3]) # Not yet log2-transformed#
+    # log2 transform#
+    df <- log2(df + 1)#
+    # Subset overlapping samples#
+    df <- df[, df.pheno$Cell]#
+    table(names(df)==df.pheno$Cell)#
+    # Create gene id column#
+    . <- data.frame("Gene"=row.names(df), stringsAsFactors=FALSE)#
+    df <- cbind.data.frame(., df)#
+    row.names(df) <- NULL#
+    # Save file#
+    path <- "/Users/seanwen/Documents/Eleni/Run_May2021/cellphonedb/input/jmml_non_relapse/"#
+    file <- "object_counts.txt"#
+    write.table(df, paste(path, file, sep=""), sep="\t", col.names=TRUE, row.names=FALSE, quote=FALSE)
+# Load packages#
+library(data.table)#
+library(SingCellaR)#
+library(plyr)#
+library(textclean)#
+#
+############################################################
+#################### CHECK INPUT FILES #####################
+############################################################
+#
+# Read count file#
+path <- "/Users/seanwen/Documents/Eleni/Run_May2021/cellphonedb/input/example_data/"#
+file <- "test_counts.txt"#
+df <- as.data.frame(fread(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE))#
+#
+df[1:5,1:5]#
+#
+# Read metadata file#
+path <- "/Users/seanwen/Documents/Eleni/Run_May2021/cellphonedb/input/example_data/"#
+file <- "test_meta.txt"#
+df.pheno <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE)#
+#
+head(df.pheno)#
+#
+# Check values#
+fivenum(df[,2]) # Normalised AND log2-transformed#
+fivenum(df[,3])#
+#
+############################################################
+################### PREPARE INPUT FILES ####################
+############################################################
+#
+# Read R object#
+path <- "/Users/seanwen/Documents/Eleni/Run_May2021/r object/"#
+file <- "ONLYDX_CLUSTERS_MERGE.SingCellaR_ClusterInfoEdited.rdata"#
+load(file=paste(path, file, sep=""))#
+object <- human_HSPCs#
+object#
+#
+# Prepare sample metadata#
+    # Retrieve sample metadata#
+    df.pheno <- object@meta.data#
+#
+    # Subset samples passing QC#
+    table(df.pheno$IsPassed)#
+    df.pheno <- df.pheno[which(df.pheno$IsPassed==TRUE), ]#
+    # Subset relevant patient group#
+    table(df.pheno$sampleID, df.pheno$status)#
+    df.pheno <- df.pheno[which(df.pheno$status %in% c("JMMLDxrelapse")), ]#
+    # Annotate cluster info#
+    df.cluster <- object@sc.clusters#
+    df.pheno <- join(df.pheno, df.cluster[,c("Cell", "louvain_cluster")], by="Cell", type="left")#
+    # Annotate cell type#
+        # Read file#
+        path <- "/Users/seanwen/Documents/Eleni/Run_May2021/r object/"#
+        file <- "ONLYDX_CLUSTERS_MERGE.SingCellaR_ClusterInfoEdited.txt"#
+        md <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE)#
+        # Annotate#
+        df.pheno <- join(df.pheno, md, by="louvain_cluster", type="left")#
+        sum(is.na(df.pheno$cell_type_anno_merged))#
+    # Subset relevant columns#
+    df.pheno <- df.pheno[,c("Cell", "cell_type_anno_merged")]#
+    names(df.pheno)[which(names(df.pheno)=="cell_type_anno_merged")] <- "cell_type"#
+    # Save file#
+    path <- "/Users/seanwen/Documents/Eleni/Run_May2021/cellphonedb/input/jmml_relapse/"#
+    file <- "object_metadata.txt"#
+    write.table(df.pheno, paste(path, file, sep=""), sep="\t", col.names=TRUE, row.names=FALSE, quote=FALSE)#
+#
+# Create gene name-gene id reference table#
+    # Read 10x GTF#
+    path <- "/Users/seanwen/Documents/U2AF1_2019/GTF/"#
+    file <- "refdata-cellranger-GRCh38-3.0.0.gtf"#
+    gtf <- as.data.frame(fread(paste(path, file, sep=""), sep="\t", header=FALSE, stringsAsFactors=FALSE))#
+    # Subest gene records#
+    gtf <- gtf[which(gtf$V3=="gene"), ]#
+    # Retrieve selected attributes#
+        # Parse attribute column#
+        attr <- strsplit(gtf$V9, split=";")#
+        # gene_id#
+        . <- sapply(attr, function(x) grep("gene_id", x, value=TRUE))#
+        gtf$gene_id <- mgsub(., c("gene_id", " ", "\""), "")#
+        # gene name#
+        . <- sapply(attr, function(x) grep("gene_name", x, value=TRUE))#
+        gtf$gene_name <- mgsub(., c("gene_name", " ", "\""), "")#
+    # Subset relevant columns#
+    gtf <- unique(gtf[,c("gene_id", "gene_name")])#
+    # Remove gene names with multiple gene ids#
+    tbl <- as.data.frame(table(gtf$gene_name))#
+    gene_names.dup <- as.character(tbl[which(tbl$Freq >=2), 1])#
+    gtf <- gtf[-which(gtf$gene_name %in% gene_names.dup), ]#
+# Prepare count matrix#
+    # Subset matrix#
+    df <- get_normalized_umi(object)#
+    # Match gene name to gene id#
+        # Retrieve overlapping genes#
+        gene_names <- unique(intersect(row.names(df), gtf$gene_name))#
+        head(gene_names)#
+        # Subset overlaps#
+        gtf <- gtf[which(gtf$gene_name %in% gene_names), ]#
+        df <- df[gtf$gene_name, ]#
+        table(row.names(df)==gtf$gene_name)#
+        # Replace gene name with gene id#
+        row.names(df) <- gtf$gene_id#
+        table(row.names(df)==gtf$gene_id)#
+#
+    # Convert to data frame#
+    df <- as.data.frame(as.matrix(df))#
+    # Check values#
+    fivenum(df[,2])#
+    fivenum(df[,3]) # Not yet log2-transformed#
+    # log2 transform#
+    df <- log2(df + 1)#
+    # Subset overlapping samples#
+    df <- df[, df.pheno$Cell]#
+    table(names(df)==df.pheno$Cell)#
+    # Create gene id column#
+    . <- data.frame("Gene"=row.names(df), stringsAsFactors=FALSE)#
+    df <- cbind.data.frame(., df)#
+    row.names(df) <- NULL#
+    # Save file#
+    path <- "/Users/seanwen/Documents/Eleni/Run_May2021/cellphonedb/input/jmml_relapse/"#
+    file <- "object_counts.txt"#
+    write.table(df, paste(path, file, sep=""), sep="\t", col.names=TRUE, row.names=FALSE, quote=FALSE)
+121.00-119.96
+68/39
+468/39
+2+10
+log2(12)
+log2(2)
+log2(10)
+2+10
+2+10/2
+log2(7)
+2*log2(12)
+log2(12)
+log2(2)
+3.584963-1
+5 + 10
+log2(5)
+log2(10)
+log2(15)
+log2(5) + log2(10)
+log10(5) + log10(10)
+log10(5)
+log10(10)
+log2(5)
+2^5
+2.321928^2
+log2(5^2)
+log2(5)^2
+log2(1)^2
+exp(2.321928)
+2^2.3
+2^2.321
+2^2.321928
+log2(5)
+2^2.321928
+2^2.321928 - 1
+log2(1.5)
+log2(0.5 + 1)
+exp(0.5849625)
+exp(0.59)
+exp(0.57)
+exp(0.56)
+log2(0.5 + 1)
+log2(1.5)
+exp(0.5849625)
+2^0.5849625
+(2^0.5849625) - 1
+# Load packages#
+library(MARVEL)#
+library(ggplot2)#
+#
+# Load MARVEL object#
+path <- "/Users/seanwen/Documents/U2AF1_2019/Pilot/MARVEL/R Object/"#
+file <- "marvel.rdata"#
+load(paste(path, file, sep=""))#
+#
+# Retrieve sample metadata#
+df.pheno <- marvel$SplicePheno#
+#
+############################################################
+#
+# Define cell groups#
+    # Check genotypes#
+    table(df.pheno$genotype)
+# Group 1 (reference)#
+    index <- which(df.pheno$genotype %in% c("WT", "JAK2"))#
+    length(index)#
+    cell.group.g1 <- df.pheno[index, "sample.id"]#
+    # Group 2 (non-reference)#
+    index <- grep("Q157", df.pheno$genotype, fixed=TRUE)#
+    length(index)#
+    cell.group.g2 <- df.pheno[index, "sample.id"]
+# DE: AD+DTS#
+marvel <- CompareValues(MarvelObject=marvel,#
+                        cell.group.g1=cell.group.g1,#
+                        cell.group.g2=cell.group.g2,#
+                        min.cells=15,#
+                        method=c("ad", "dts"),#
+                        method.adjust="fdr",#
+                        level="splicing",#
+                        event.type=c("SE", "MXE", "RI", "A5SS", "A3SS", "ALE", "AFE"),#
+                        show.progress=TRUE#
+                        )
+# Check AD-DTS sig events overlaps#
+    # AD#
+    results <- marvel$DE$PSI$Table[["ad"]]#
+    index <- which(results$p.val.adj < 0.10 & abs(results$mean.diff) > 10 & results$outlier==FALSE)#
+    length(index)#
+    tran_ids.ad <- results[index, "tran_id"]#
+    # DTS#
+    results <- marvel$DE$PSI$Table[["dts"]]#
+    index <- which(results$p.val.adj < 0.10 & abs(results$mean.diff) > 10 & results$outlier==FALSE)#
+    length(index)#
+    tran_ids.dts <- results[index, "tran_id"]#
+    # Overlap#
+    length(setdiff(tran_ids.ad, tran_ids.dts))#
+    length(setdiff(tran_ids.dts, tran_ids.ad))#
+    length(intersect(tran_ids.ad, tran_ids.dts))
+# AD#
+    path <- "/Users/seanwen/Documents/U2AF1_2019/Pilot/MARVEL/de/Q157 vs WT/"#
+    file <- "de_ad.txt"#
+    write.table(marvel$DE$PSI$Table[["ad"]], paste(path, file, sep=""), sep="\t", col.names=TRUE, row.names=FALSE, quote=FALSE)#
+#
+    # DTS#
+    path <- "/Users/seanwen/Documents/U2AF1_2019/Pilot/MARVEL/de/Q157 vs WT/"#
+    file <- "de_dts.txt"#
+    write.table(marvel$DE$PSI$Table[["dts"]], paste(path, file, sep=""), sep="\t", col.names=TRUE, row.names=FALSE, quote=FALSE)
+45 + 17259
+160 + 300 + 1154
+372.01/43
+13585 + 9908 + 3564 + 114 + 354 + 27 + 85 + 13 + 38
+31597 + 29482 + 47080 + 120180
+300/12
+422-14
+1014=14
+1014-14
+247 + 175
+483 + 531
+60 * 40000
+2400000 / 60 / 60 / 24
+# Load packages#
+library(MARVEL)#
+library(ggplot2)#
+#
+# Load MARVEL object#
+path <- "/Users/seanwen/Documents/U2AF1_2019/Pilot/MARVEL/R Object/"#
+file <- "marvel.rdata"#
+load(paste(path, file, sep=""))#
+#
+# Collapse genotype#
+df.pheno <- marvel$SplicePheno#
+df.pheno$genotype.collapsed <- NA#
+df.pheno$genotype.collapsed[which(df.pheno$genotype %in% c("WT", "JAK2"))] <- "U2AF1_WT"#
+df.pheno$genotype.collapsed[grep("S34", df.pheno$genotype, fixed=TRUE)] <- "U2AF1_S34"#
+df.pheno$genotype.collapsed[grep("Q157", df.pheno$genotype, fixed=TRUE)] <- "U2AF1_Q157"#
+sum(is.na(df.pheno$genotype.collapsed))#
+marvel$SplicePheno <- df.pheno
+18829 + 554
+5658 + 13727
+5662 + 13721
+8688 + 10697
+8689 + 10694
+13870 + 7739
+13880 + 7731
+13880 + 7731 - 1969
+19383 - 7729
+library(SingCellaR)
+dif_expression
+?dif_expression
+#Differential expression analysis between p53-mutant, preleukemic, MF and normal donor cells#
+#to derive p53-LSC signature#
+#Data pre-processing for Figure2#
+#Author:Alba Rodriguez-Meira#
+#Date: 16th June 2021#
+#Modified last: 16th June 2021#
+#####################################################
+#
+####################################
+library(SingleCellExperiment)#
+library(Rcpp)#
+library(Matrix)#
+library(matrixStats)#
+library(bigmemory)#
+library(LinkedMatrix)#
+library(irlba)#
+library(Rtsne)#
+library(ggplot2)#
+library(gridExtra)#
+library(cccd)#
+library(ggpubr)#
+library(statmod)#
+library(umap)#
+library(reticulate)#
+library(data.table)#
+library(pbapply)#
+library(fgsea)#
+library(limma)#
+library(RANN)#
+library(ComplexHeatmap)#
+library(circlize)#
+library(threejs)#
+library(RColorBrewer)#
+library(igraph)#
+library(pheatmap)#
+library(AUCell)#
+library(diffusionMap)#
+library(destiny)#
+###################################
+###################################
+source("/Users/seanwen/Dropbox/p53_paper_IAD/Sources/SingleCellaR.0.1.6/SingleCellRNASeq.R")#
+source("/Users/seanwen/Dropbox/p53_paper_IAD/Sources/SingleCellaR.0.1.6/SingleCellClasses.R")#
+source("/Users/seanwen/Dropbox/p53_paper_IAD/Sources/SingleCellaR.0.1.6/SingleCellGenerics.R")#
+source("/Users/seanwen/Dropbox/p53_paper_IAD/Sources/SingleCellaR.0.1.6/SingleCellPlots.R")#
+source("/Users/seanwen/Dropbox/p53_paper_IAD/Sources/SingleCellaR.0.1.6/SingleCellUtils.R")#
+source("/Users/seanwen/Dropbox/p53_paper_IAD/Sources/SingleCellaR.0.1.6/SingleCell_Integration.R")#
+#Rcpp::sourceCpp("/Users/seanwen/Dropbox/p53_paper_IAD/Sources/SingleCellaR.0.1.4/src/utils.cpp")#
+###################################
+source("/Users/seanwen/Documents/Alba/data_check/Sources/TARGETseq_functions.R")#
+load(file="/Users/seanwen/Dropbox/p53_paper_IAD/01.Preprocessing/HT_transcriptome/SinglCellaR/Robjects/MFp53MPNAML_integration.rdata")#
+######################################
+###################################
+#
+table(MPN.integration.all@meta.data$merged.louvain)#
+#
+# Select groups for DGE analysis#
+AP_LSC_erythroid<-MPN.integration.all@meta.data[MPN.integration.all@meta.data$merged.louvain=="cl1_erythroid"|MPN.integration.all@meta.data$merged.louvain=="cl5_erythroid_cycling"|#
+                                          MPN.integration.all@meta.data$merged.louvain=="cl2_LSC"|MPN.integration.all@meta.data$merged.louvain=="cl3_LSC_cycling",c("Cell")]#
+AP_LSC_only<-MPN.integration.all@meta.data[MPN.integration.all@meta.data$merged.louvain=="cl2_LSC"|MPN.integration.all@meta.data$merged.louvain=="cl3_LSC_cycling",c("Cell")]#
+AP_MF<-MPN.integration.all@meta.data[MPN.integration.all@meta.data$merged.louvain=="MF",c("Cell")]#
+AP_normal<-MPN.integration.all@meta.data[MPN.integration.all@meta.data$merged.louvain=="normal",c("Cell")]#
+AP_preleukemic<-MPN.integration.all@meta.data[MPN.integration.all@meta.data$merged.louvain=="cl4_preleukemic",c("Cell")]#
+AP_erythroid<-MPN.integration.all@meta.data[MPN.integration.all@meta.data$merged.louvain=="cl1_erythroid"|MPN.integration.all@meta.data$merged.louvain=="cl5_erythroid_cycling",c("Cell")]#
+#
+cols.A<-AP_LSC_erythroid#
+cols.B<-AP_LSC_only#
+cols.C<-AP_MF#
+cols.D<-AP_normal#
+cols.E<-AP_preleukemic#
+cols.F<-AP_erythroid#
+######################################
+umi.dat<-get_normalized_umi(MPN.integration.all)#
+genes.info<-get_genes_metadata(MPN.integration.all)#
+# Subset the counts matrix by expressed genes#
+genes.info<-subset(genes.info,IsExpress==TRUE)#
+gene.index<-rownames(umi.dat) %in% rownames(genes.info)#
+umi.dat<-umi.dat[gene.index,]#
+#
+# Normalized counts using log2 transformation before doing DGE analysis#
+umi.dat.log2<-umi.dat#
+min_expr<-1 #
+umi.dat.log2[umi.dat.log2 < min_expr]<- 0#
+umi.dat.log2[umi.dat.log2 >= min_expr]<-log2(umi.dat.log2[umi.dat.log2 >= min_expr])#
+#
+######################################
+a.index<-which(colnames(umi.dat.log2) %in% cols.A)#
+b.index<-which(colnames(umi.dat.log2) %in% cols.B)#
+c.index<-which(colnames(umi.dat.log2) %in% cols.C)#
+d.index<-which(colnames(umi.dat.log2) %in% cols.D)#
+e.index<-which(colnames(umi.dat.log2) %in% cols.E)#
+f.index<-which(colnames(umi.dat.log2) %in% cols.F)#
+# Subset matrix including only cells from selected groups#
+cellsA.m<-umi.dat.log2[,a.index] #24230 genes 9157 cells#
+cellsB.m<-umi.dat.log2[,b.index] #24230 genes 4565 cells#
+cellsC.m<-umi.dat.log2[,c.index] #24230 genes 2055 cells#
+cellsD.m<-umi.dat.log2[,d.index] #24230 genes 5015 cells#
+cellsE.m<-umi.dat.log2[,e.index] #24230 genes 1381 cells#
+cellsF.m<-umi.dat.log2[,f.index] #24230 genes 4592 cells#
+######################################
+#
+#Comparisons: #
+#1) cellsA.m with cellsC.m, cellsD.m and cellsE.m#
+#2) cellsB.m with cellsC.m, cellsD.m and cellsE.m#
+#
+######################################
+#Comparisons #1#
+#p53_vs_MF<-dif_expression(groupA="p53_all",groupB="MF",groupA.m=cellsA.m,groupB.m=cellsC.m,pvalue_cutoff=0.1)#
+#save(p53_vs_MF,file="p53_vs_MF.rdata")#
+#p53_vs_MF$class<-"NA"#
+#p53_vs_MF$class[p53_vs_MF$log2fc<(-0.75) & p53_vs_MF$p.adjusted<0.05]<-"up_in_p53all"#
+#p53_vs_MF$class[p53_vs_MF$log2fc>0.75 & p53_vs_MF$p.adjusted<0.05]<-"up_in_MF"#
+#
+#write.table(p53_vs_MF,file="output/DGE_p53_vs_MF.txt",sep="\t",row.names = F)#
+#
+#p53_vs_normal<-dif_expression(groupA="p53_all",groupB="normal",groupA.m=cellsA.m,groupB.m=cellsD.m,pvalue_cutoff=0.1)#
+#save(p53_vs_normal,file="p53_vs_normal.rdata")#
+#ery_vs_notery$class<-"NA"#
+#ery_vs_notery$class[ery_vs_notery$log2fc<(-0.5) & ery_vs_notery$p.adjusted<0.1]<-"up_in_ery"#
+#ery_vs_notery$class[ery_vs_notery$log2fc>0.5 & ery_vs_notery$p.adjusted<0.1]<-"up_in_not_ery"#
+#
+#write.table(p53_vs_normal,file="output/DGE_p53_vs_normal.txt",sep="\t",row.names = F)#
+#
+#p53_vs_preleuk<-dif_expression(groupA="p53_all",groupB="preleukemic",groupA.m=cellsA.m,groupB.m=cellsE.m,pvalue_cutoff=0.1)#
+#save(p53_vs_preleuk,file="p53_vs_preleuk.rdata")#
+#ery_vs_notery$class<-"NA"#
+#ery_vs_notery$class[ery_vs_notery$log2fc<(-0.5) & ery_vs_notery$p.adjusted<0.1]<-"up_in_ery"#
+#ery_vs_notery$class[ery_vs_notery$log2fc>0.5 & ery_vs_notery$p.adjusted<0.1]<-"up_in_not_ery"#
+#
+#write.table(p53_vs_preleuk,file="output/DGE_p53_vs_preleuk.txt",sep="\t",row.names = F)#
+#
+######################################
+#
+######################################
+#Comparisons #2#
+#p53LSC_vs_MF<-dif_expression(groupA="p53_LSC",groupB="MF",groupA.m=cellsB.m,groupB.m=cellsC.m,pvalue_cutoff=0.1)#
+#save(p53LSC_vs_MF,file="p53LSC_vs_MF.rdata")#
+#ery_vs_notery$class<-"NA"#
+#ery_vs_notery$class[ery_vs_notery$log2fc<(-0.5) & ery_vs_notery$p.adjusted<0.1]<-"up_in_ery"#
+#ery_vs_notery$class[ery_vs_notery$log2fc>0.5 & ery_vs_notery$p.adjusted<0.1]<-"up_in_not_ery"#
+#
+#write.table(p53LSC_vs_MF,file="output/DGE_p53LSC_vs_MF.txt",sep="\t",row.names = F)#
+#
+#p53LSC_vs_normal<-dif_expression(groupA="p53_LSC",groupB="normal",groupA.m=cellsB.m,groupB.m=cellsD.m,pvalue_cutoff=0.1)#
+#save(p53LSC_vs_normal,file="p53LSC_vs_normal.rdata")#
+#ery_vs_notery$class<-"NA"#
+#ery_vs_notery$class[ery_vs_notery$log2fc<(-0.5) & ery_vs_notery$p.adjusted<0.1]<-"up_in_ery"#
+#ery_vs_notery$class[ery_vs_notery$log2fc>0.5 & ery_vs_notery$p.adjusted<0.1]<-"up_in_not_ery"#
+#
+#write.table(p53LSC_vs_normal,file="output/DGE_p53LSC_vs_normal.txt",sep="\t",row.names = F)#
+#
+#p53LSC_vs_preleuk<-dif_expression(groupA="p53_LSC",groupB="preleukemic",groupA.m=cellsB.m,groupB.m=cellsE.m,pvalue_cutoff=0.1)#
+#save(p53LSC_vs_preleuk,file="p53LSC_vs_preleuk.rdata")#
+#ery_vs_notery$class<-"NA"#
+#ery_vs_notery$class[ery_vs_notery$log2fc<(-0.5) & ery_vs_notery$p.adjusted<0.1]<-"up_in_ery"#
+#ery_vs_notery$class[ery_vs_notery$log2fc>0.5 & ery_vs_notery$p.adjusted<0.1]<-"up_in_not_ery"#
+#
+#write.table(p53LSC_vs_preleuk,file="output/DGE_p53LSC_vs_preleuk.txt",sep="\t",row.names = F)#
+#
+######################################
+######################################
+#Comparisons #2#
+p53ery_vs_MF<-dif_expression(groupA="p53_ery",groupB="MF",groupA.m=cellsF.m,groupB.m=cellsC.m,pvalue_cutoff=0.1)#
+save(p53ery_vs_MF,file="/Users/seanwen/Documents/Alba/Manuscript/TP53/Data/Raw/tLSC/v4_upP53_ery/p53ery_vs_MF.rdata")#
+#ery_vs_notery$class<-"NA"#
+#ery_vs_notery$class[ery_vs_notery$log2fc<(-0.5) & ery_vs_notery$p.adjusted<0.1]<-"up_in_ery"#
+#ery_vs_notery$class[ery_vs_notery$log2fc>0.5 & ery_vs_notery$p.adjusted<0.1]<-"up_in_not_ery"#
+#
+write.table(p53ery_vs_MF,file="/Users/seanwen/Documents/Alba/Manuscript/TP53/Data/Raw/tLSC/v4_upP53_ery/DGE_p53ery_vs_MF.txt",sep="\t",row.names = F)#
+#
+p53ery_vs_normal<-dif_expression(groupA="p53_ery",groupB="normal",groupA.m=cellsF.m,groupB.m=cellsD.m,pvalue_cutoff=0.1)#
+save(p53ery_vs_normal,file="/Users/seanwen/Documents/Alba/Manuscript/TP53/Data/Raw/tLSC/v4_upP53_ery/p53ery_vs_normal.rdata")#
+#ery_vs_notery$class<-"NA"#
+#ery_vs_notery$class[ery_vs_notery$log2fc<(-0.5) & ery_vs_notery$p.adjusted<0.1]<-"up_in_ery"#
+#ery_vs_notery$class[ery_vs_notery$log2fc>0.5 & ery_vs_notery$p.adjusted<0.1]<-"up_in_not_ery"#
+#
+write.table(p53ery_vs_normal,file="/Users/seanwen/Documents/Alba/Manuscript/TP53/Data/Raw/tLSC/v4_upP53_ery/DGE_p53LSC_vs_normal.txt",sep="\t",row.names = F)#
+#
+p53ery_vs_preleuk<-dif_expression(groupA="p53_LSC",groupB="preleukemic",groupA.m=cellsF.m,groupB.m=cellsE.m,pvalue_cutoff=0.1)#
+save(p53ery_vs_preleuk,file="/Users/seanwen/Documents/Alba/Manuscript/TP53/Data/Raw/tLSC/v4_upP53_ery/p53LSC_vs_preleuk.rdata")#
+#ery_vs_notery$class<-"NA"#
+#ery_vs_notery$class[ery_vs_notery$log2fc<(-0.5) & ery_vs_notery$p.adjusted<0.1]<-"up_in_ery"#
+#ery_vs_notery$class[ery_vs_notery$log2fc>0.5 & ery_vs_notery$p.adjusted<0.1]<-"up_in_not_ery"#
+#
+write.table(p53ery_vs_preleuk,file="/Users/seanwen/Documents/Alba/Manuscript/TP53/Data/Raw/tLSC/v4_upP53_ery/DGE_p53LSC_vs_preleuk.txt",sep="\t",row.names = F)
+save(p53ery_vs_MF,file="/Users/seanwen/Documents/Alba/Manuscript/TP53/Data/Raw/tLSC/v4_upP53_ery/p53ERY_vs_MF.rdata")
+write.table(p53ery_vs_MF,file="/Users/seanwen/Documents/Alba/Manuscript/TP53/Data/Raw/tLSC/v4_upP53_ery/DGE_p53ERY_vs_MF.txt",sep="\t",row.names = F)
+save(p53ery_vs_normal,file="/Users/seanwen/Documents/Alba/Manuscript/TP53/Data/Raw/tLSC/v4_upP53_ery/p53eERY_vs_normal.rdata")
+write.table(p53ery_vs_normal,file="/Users/seanwen/Documents/Alba/Manuscript/TP53/Data/Raw/tLSC/v4_upP53_ery/DGE_p53ERY_vs_normal.txt",sep="\t",row.names = F)
+save(p53ery_vs_preleuk,file="/Users/seanwen/Documents/Alba/Manuscript/TP53/Data/Raw/tLSC/v4_upP53_ery/p53ERY_vs_preleuk.rdata")
+write.table(p53ery_vs_preleuk,file="/Users/seanwen/Documents/Alba/Manuscript/TP53/Data/Raw/tLSC/v4_upP53_ery/DGE_p53ERY_vs_preleuk.txt",sep="\t",row.names = F)
+save(p53ery_vs_normal,file="/Users/seanwen/Documents/Alba/Manuscript/TP53/Data/Raw/tLSC/v4_upP53_ery/p53ERY_vs_normal.rdata")
+18194 + 1191
+rev("takoyaki")
+221+116\
+221+116
+290+46
+290+47
+# Load packages#
+library(data.table)#
+#
+#################################################################
+########################### MPNAMLB1 ############################
+#################################################################
+#
+# Read local file#
+path <- "/Users/seanwen/Documents/Alba/data_check/01.Preprocessing/HT_transcriptome/MPNAMLB1/"#
+file <- "p53_HTMPNAML_B1_counts.qc.tsv"#
+df.1 <- as.data.frame(fread(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE))#
+#
+# Read Dropbox file#
+path <- "/Users/seanwen/Dropbox/p53_paper_IAD/01.Preprocessing/HT_transcriptome/MPNAMLB1/"#
+file <- "p53_HTMPNAML_B1_counts.qc.tsv"#
+df.2 <- as.data.frame(fread(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE))
+dim(df.1)#
+dim(df.2)
+all.equal(df.1,df.2)
+# Read local file#
+path <- "/Users/seanwen/Documents/Alba/data_check/01.Preprocessing/HT_transcriptome/MPNAMLB2/"#
+file <- "p53_HTMPNAMLB2_counts.qc.tsv"#
+df.1 <- as.data.frame(fread(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE))#
+#
+# Read Dropbox file#
+path <- "/Users/seanwen/Dropbox/p53_paper_IAD/01.Preprocessing/HT_transcriptome/MPNAMLB2/"#
+file <- "p53_HTMPNAMLB2_counts.qc.tsv"#
+df.2 <- as.data.frame(fread(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE))#
+#
+# Check dimensions#
+dim(df.1)#
+dim(df.2)#
+#
+# Check entire object#
+all.equal(df.1,df.2)#
+#
+#################################################################
+########################### MPNAMLB3 ############################
+#################################################################
+#
+# Read local file#
+path <- "/Users/seanwen/Documents/Alba/data_check/01.Preprocessing/HT_transcriptome/MPNAMLB3/"#
+file <- "p53_HTMPNAMLB3_counts.qc.tsv"#
+df.1 <- as.data.frame(fread(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE))#
+#
+# Read Dropbox file#
+path <- "/Users/seanwen/Dropbox/p53_paper_IAD/01.Preprocessing/HT_transcriptome/MPNAMLB3/"#
+file <- "p53_HTMPNAMLB3_counts.qc.tsv"#
+df.2 <- as.data.frame(fread(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE))#
+#
+# Check dimensions#
+dim(df.1)#
+dim(df.2)#
+#
+# Check entire object#
+all.equal(df.1,df.2)
+library(data.table)
+# Read local file#
+    path <- "/Users/seanwen/Documents/Alba/data_check/01.Preprocessing/HT_transcriptome/MPNAMLB1/"#
+    file <- "p53_HTMPNAMLB1_colData.qc.tsv"#
+    df.1 <- as.data.frame(fread(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE))#
+#
+    # Read Dropbox file#
+    path <- "/Users/seanwen/Dropbox/p53_paper_IAD/01.Preprocessing/HT_transcriptome/MPNAMLB1/"#
+    file <- "p53_HTMPNAMLB1_colData.qc.tsv"#
+    df.2 <- as.data.frame(fread(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE))
+path <- "/Users/seanwen/Documents/Alba/data_check/01.Preprocessing/HT_transcriptome/MPNAMLB1/"#
+    file <- "p53_HTMPNAMLB1_colData.qc.csv"#
+    df.1 <- as.data.frame(fread(paste(path, file, sep=""), sep=",", header=TRUE, stringsAsFactors=FALSE))#
+#
+    # Read Dropbox file
+path <- "/Users/seanwen/Dropbox/p53_paper_IAD/01.Preprocessing/HT_transcriptome/MPNAMLB1/"#
+    file <- "p53_HTMPNAMLB1_colData.qc.csv"#
+    df.2 <- as.data.frame(fread(paste(path, file, sep=""), sep=",", header=TRUE, stringsAsFactors=FALSE))
+# Check dimensions#
+    dim(df.1)#
+    dim(df.2)#
+#
+    # Check values#
+    all.equal(df.1,df.2)
+path <- "/Users/seanwen/Documents/Alba/data_check/01.Preprocessing/HT_transcriptome/MPNAMLB2/"#
+    file <- "p53_MPNAMLB2_colData.qc.csv"#
+    df.1 <- as.data.frame(fread(paste(path, file, sep=""), sep=",", header=TRUE, stringsAsFactors=FALSE))#
+#
+    # Read Dropbox file#
+    path <- "/Users/seanwen/Dropbox/p53_paper_IAD/01.Preprocessing/HT_transcriptome/MPNAMLB2/"#
+    file <- "p53_MPNAMLB2_colData.qc.csv"#
+    df.2 <- as.data.frame(fread(paste(path, file, sep=""), sep=",", header=TRUE, stringsAsFactors=FALSE))#
+#
+    # Check dimensions#
+    dim(df.1)#
+    dim(df.2)#
+#
+    # Check values#
+    all.equal(df.1,df.2)
+# Read local file#
+    path <- "/Users/seanwen/Documents/Alba/data_check/01.Preprocessing/HT_transcriptome/MPNAMLB2/"#
+    file <- "p53_HTMPNAMLB2_colData.qc.csv"#
+    df.1 <- as.data.frame(fread(paste(path, file, sep=""), sep=",", header=TRUE, stringsAsFactors=FALSE))#
+#
+    # Read Dropbox file#
+    path <- "/Users/seanwen/Dropbox/p53_paper_IAD/01.Preprocessing/HT_transcriptome/MPNAMLB2/"#
+    file <- "p53_HTMPNAMLB2_colData.qc.csv"#
+    df.2 <- as.data.frame(fread(paste(path, file, sep=""), sep=",", header=TRUE, stringsAsFactors=FALSE))#
+#
+    # Check dimensions#
+    dim(df.1)#
+    dim(df.2)
+all.equal(df.1,df.2)
+# Read local file#
+    path <- "/Users/seanwen/Documents/Alba/data_check/01.Preprocessing/HT_transcriptome/MPNAMLB3/"#
+    file <- "p53_HTMPNAMLB3_colData.qc.csv"#
+    df.1 <- as.data.frame(fread(paste(path, file, sep=""), sep=",", header=TRUE, stringsAsFactors=FALSE))#
+#
+    # Read Dropbox file#
+    path <- "/Users/seanwen/Dropbox/p53_paper_IAD/01.Preprocessing/HT_transcriptome/MPNAMLB3/"#
+    file <- "p53_HTMPNAMLB3_colData.qc.csv"#
+    df.2 <- as.data.frame(fread(paste(path, file, sep=""), sep=",", header=TRUE, stringsAsFactors=FALSE))#
+#
+    # Check dimensions#
+    dim(df.1)#
+    dim(df.2)#
+#
+    # Check values#
+    all.equal(df.1,df.2)
+library(data.table)
+# Read local file#
+    path <- "/Users/seanwen/Documents/Alba/data_check/01.Preprocessing/HT_transcriptome/SinglCellaR/"#
+    file <- "p53_HTMPNAML_colData.qc.final.csv"#
+    df.1 <- as.data.frame(fread(paste(path, file, sep=""), sep=",", header=TRUE, stringsAsFactors=FALSE))#
+    names(df.1)[which(names(df.1)=="Cell")] <- "cell_id"#
+#
+    # Read Dropbox file#
+    path <- "/Users/seanwen/Dropbox/p53_paper_IAD/01.Preprocessing/HT_transcriptome/SinglCellaR/"#
+    file <- "p53_HTMPNAML_colData.qc.final.csv"#
+    df.2 <- as.data.frame(fread(paste(path, file, sep=""), sep=",", header=TRUE, stringsAsFactors=FALSE))#
+#
+    # Check dimensions#
+    dim(df.1)#
+    dim(df.2)
+all.equal(df.1,df.2) # OK
+path <- "/Users/seanwen/Dropbox/p53_paper_IAD/01.Preprocessing/HT_transcriptome/SinglCellaR/"#
+    file <- "Robjects/AP_HTMPNAML_Harmony.rdata"#
+    object.2 <- local(get(load(file=paste(path, file, sep=""))))
+names(attributes(object.2))
+. <- object.2A$diffusionmap.result
+. <- object.2$diffusionmap.result
+. <- object.2@diffusionmap.result
+head(.)
+.[which(.$Cell=="MPNAML10PL35_11A"),]
+# Load packages#
+library(data.table)#
+library(plyr)#
+#
+# Read expression files#
+    # Matrix#
+    path <- "/Users/seanwen/Documents/Alba/data_check/01.Preprocessing/TCGA/FPKM/"#
+    file <- "FPKM.txt"#
+    df <- as.data.frame(fread(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE))#
+    row.names(df) <- df$gene_id#
+    df$gene_id <- NULL#
+    # Gene metadata#
+    path <- "/Users/seanwen/Documents/Alba/data_check/01.Preprocessing/TCGA/FPKM/"#
+    file <- "FPKM_featureData.txt"#
+    df.feature <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE)#
+    # Transform and censor values#
+    df <- log2(df + 1)#
+    df[df < 1] <- 0#
+#
+# Read signature gene file#
+path <- "/Users/seanwen/Documents/Alba/inflammation/iscore/"#
+file <- "supp_table_11_adult.txt"#
+df.sig <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE)
+path <- "/Users/seanwen/Documents/Alba/inflammation/iscore/"#
+file <- "supp_table_11_adults.txt"#
+df.sig <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE)
+sig.genes <- df.sig$gene.name
+sig.genes
+head(df.sig)
+sig.genes <- df.sig$Gene.name
+setdiff(sig.genes, df.feature$gene_short_name)
+# Subset#
+    df.feature.small <- df.feature[which(df.feature$gene_short_name %in% sig.genes), ]#
+    df.feature.small$gene_short_name <- factor(df.feature.small$gene_short_name, levels=sig.genes)#
+    df.feature.small <- df.feature.small[order(df.feature.small$gene_short_name), ]#
+    df.small <- df[df.feature.small$gene_id, ]
+dim(df.small)
+df.small[1:5,1:5]
+# Read expression files#
+    # Matrix#
+    path <- "/Users/seanwen/Documents/Alba/data_check/01.Preprocessing/TCGA/FPKM/"#
+    file <- "FPKM.txt"#
+    df <- as.data.frame(fread(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE))#
+    row.names(df) <- df$gene_id#
+    df$gene_id <- NULL#
+    # Gene metadata#
+    path <- "/Users/seanwen/Documents/Alba/data_check/01.Preprocessing/TCGA/FPKM/"#
+    file <- "FPKM_featureData.txt"#
+    df.feature <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE)#
+    # Transform and censor values#
+    df <- log2(df + 1)#
+    df[df < 1] <- 0#
+#
+# Read signature gene file#
+path <- "/Users/seanwen/Documents/Alba/inflammation/iscore/"#
+file <- "supp_table_11_adults.txt"#
+df.sig <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE)#
+#
+# Subset signature genes#
+    # Check if all relevant genes found#
+    sig.genes <- df.sig$Gene.name#
+    setdiff(sig.genes, df.feature$gene_short_name)
+sig.genes
+names(df.sig)[which(names(df.sig)=="Gene.name")] <- "gene_short_name"
+head(df.feature)
+df.sig <- join(df.sig, df.feature[,c("gene_short_name", "gene_id")], by="gene_short_name", type="left")
+head(df.sig)
+df.small <- df[df.sig$gene_id, ]
+head(df.small)
+dim(df.small)
+table(row.names(df.small)==df.sig$gene_id)
+row.names(df.small) <- df.sig$ggene_short_name
+df.small[1:5,1:5]
+row.names(df.small) <- df.sig$gene_short_name
+df.small[1:5,1:5]
+head(df.sig)
+dim(data.frame(mapply(`*`,df.small,df.sig$beta.mean)))
+dim(df.small)
+dim(df.sig)
+data.frame(mapply(`*`,df.small,df.sig$beta.mean, SIMPLIFY=FALSE))
+dim(data.frame(mapply(`*`,df.small,df.sig$beta.mean, SIMPLIFY=FALSE))#
+)
+class(data.frame(mapply(`*`,df.small,df.sig$beta.mean, SIMPLIFY=FALSE))#
+)
+dim(data.frame(mapply(`*`,df.small,df.sig$beta.mean))#
+)
+results <- data.frame(mapply(`*`,df.small,df.sig$beta.mean))
+dim(results)
+results[1:5,1:5]
+df.small[1:5,1:5]
+head(df.sig)
+4.359729*0.07179486
+2.976542*0.07179486
+results <- data.frame(mapply(`*`,as.data.frame(t(df.small),df.sig$beta.mean))
+results <- data.frame(mapply(`*`,as.data.frame(t(df.small)),df.sig$beta.mean))
+dim(results)
+results[1:5,1:5]
+df[1:5,1:5]
+df.small[1:5,1:5]
+head(df.sig)
+2.976542*0.07179486
+results <- data.frame(mapply(`*`,as.data.frame(t(t(df.small))),df.sig$beta.mean))
+resutls <- apply(df.small, 1, df.sig$beta.mean)
+results <- apply(df.small, 1, function(x) {x * df.sig$beta.mean})
+warnigns()
+warnings()
+results <- apply(df.small, 2, function(x) {x * df.sig$beta.mean})
+results[1:5,1:5]
+class(results)
+results <- apply(df.small, 2, function(x) {x * df.sig$beta.mean})#
+results <- as.data.frame(results)
+results[1:5,1:5]
+df.small[1:5,1:5]
+head(df.sig)
+2.976542 * 0.07179486
+4.681350* -0.32775795
+3.424306 * -0.32775795
+head(colMeans(results))
+. <- colMeans(results)
+head(.)
+results <- data.frame("patient.id"=names(.),#
+                      "iscore"=as.numeric(.),#
+                      stringsAsFactors=FALSE#
+                      )
+head(results)
+fivenum(results$iscore)
+write.table(results, paste(path, file, sep=""), sep="\t", col.names=TRUE, row.names=FALSE, quote=FALSE)
+# Load packages#
+library(plyr)#
+library(survival)#
+library(survminer)#
+library(ggplot2)#
+#
+# Read patient-level file#
+df <- read.table("/Users/seanwen/Documents/Alba/data_check/Sources/TCGA/Master.txt", sep="\t", header=TRUE, stringsAsFactors=FALSE)#
+#
+# Remove entries with missing survival data#
+df <- df[which(!is.na(df$time)), ]#
+df <- df[which(!is.na(df$status)), ]#
+#
+# Annotate score#
+    # Read file#
+    path <- "/Users/seanwen/Documents/Alba/inflammation/iscore/tcga/"#
+    file <- "per-patient_score.txt"#
+    df.score <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE)#
+#
+    # Annotate#
+    df <- join(df, df.score, by="patient.id", type="left")#
+#
+    # Remove entries with missing expression data#
+    df <- df[which(!is.na(df$iscore)), ]#
+    dim(df)#
+#
+    # Binarize scorse#
+    df$score.bi <- ifelse(df$iscore < median(df$iscore), "low", "high")#
+    df$score.bi <- factor(df$score.bi, levels=c("low", "high"))#
+    table(df$score.bi)
+# Annotate age#
+    # Read file#
+    path <- "/Users/seanwen/Documents/Alba/data_check/01.Preprocessing/TCGA/Clinical/"#
+    file <- "Clinical.txt"#
+    df.clinical <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE)#
+#
+    # Annotate#
+    df <- join(df, df.clinical[,c("patient.id", "age_at_index")], by="patient.id", type="left")#
+    names(df)[which(names(df)=="age_at_index")] <- "age"
+model <- coxph(Surv(time, status) ~ score.bi, data=df)#
+summary(model)
+# Model#
+    model <- survfit(Surv(time, status) ~ score.bi, data=df)#
+#
+    # Plot#
+    xmin <- 0 ; xmax <- ceiling(max(df$time, na.rm=TRUE))#
+    plot <- ggsurvplot(model,#
+                       data=df,#
+                       risk.table=TRUE,#
+                       palette=c("grey60","red3"),#
+                       xlim=c(xmin, xmax),#
+                       break.x.by=1,#
+                       fontsize=5,#
+                       ggtheme = theme_classic2(base_size=20))#
+#
+    # Save file#
+    path <- "/Users/seanwen/Documents/Alba/inflammation/iscore/tcga/"#
+    file <- "km_curve_all_patients.pdf"#
+#
+    pdf(paste(path, file, sep=""))#
+    print(plot, newpage=FALSE)#
+    dev.off()
+df.small <- df[which(df$age < 60), ]#
+#
+# Cox proportional-hazards model#
+model <- coxph(Surv(time, status) ~ score.bi, data=df.small)#
+summary(model)
+# Load packages#
+library(data.table)#
+library(plyr)#
+#
+# Read expression files#
+    # Matrix#
+    path <- "/Users/seanwen/Documents/Alba/data_check/01.Preprocessing/TCGA/FPKM/"#
+    file <- "FPKM.txt"#
+    df <- as.data.frame(fread(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE))#
+    row.names(df) <- df$gene_id#
+    df$gene_id <- NULL#
+    # Gene metadata#
+    path <- "/Users/seanwen/Documents/Alba/data_check/01.Preprocessing/TCGA/FPKM/"#
+    file <- "FPKM_featureData.txt"#
+    df.feature <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE)#
+    # Transform and censor values#
+    df <- log2(df + 1)#
+    df[df < 1] <- 0#
+#
+# Read signature gene file#
+path <- "/Users/seanwen/Documents/Alba/inflammation/iscore/"#
+file <- "supp_table_11_adults.txt"#
+df.sig <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE)#
+#
+# Subset signature genes#
+    # Check if all relevant genes found#
+    sig.genes <- df.sig$Gene.name#
+    setdiff(sig.genes, df.feature$gene_short_name) # All genes found#
+    # Annotate gene_id#
+    names(df.sig)[which(names(df.sig)=="Gene.name")] <- "gene_short_name"#
+    df.sig <- join(df.sig, df.feature[,c("gene_short_name", "gene_id")], by="gene_short_name", type="left")#
+    # Subset expression matrix#
+    df.small <- df[df.sig$gene_id, ]#
+#
+    # Replace gene ids w/ gene names#
+    table(row.names(df.small)==df.sig$gene_id)#
+    row.names(df.small) <- df.sig$gene_short_name#
+# Compute per-sample scores#
+results <- apply(df.small, 2, function(x) {x * df.sig$beta.mean})#
+results <- as.data.frame(results)#
+. <- colMeans(results)#
+results <- data.frame("patient.id"=names(.),#
+                      "iscore"=as.numeric(.),#
+                      stringsAsFactors=FALSE#
+                      )#
+fivenum(results$iscore)#
+#
+# Save file#
+path <- "/Users/seanwen/Documents/Alba/inflammation/iscore/tcga/"#
+file <- "per-patient_score.txt"#
+write.table(results, paste(path, file, sep=""), sep="\t", col.names=TRUE, row.names=FALSE, quote=FALSE)
+# Load packages#
+library(data.table)#
+library(plyr)#
+#
+# Read expression files#
+    # Matrix#
+    path <- "/Users/seanwen/Documents/Alba/data_check/01.Preprocessing/TCGA/FPKM/"#
+    file <- "FPKM.txt"#
+    df <- as.data.frame(fread(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE))#
+    row.names(df) <- df$gene_id#
+    df$gene_id <- NULL#
+    # Gene metadata#
+    path <- "/Users/seanwen/Documents/Alba/data_check/01.Preprocessing/TCGA/FPKM/"#
+    file <- "FPKM_featureData.txt"#
+    df.feature <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE)#
+    # Transform and censor values#
+    df <- log2(df + 1)#
+    df[df < 1] <- 0#
+#
+# Read signature gene file#
+path <- "/Users/seanwen/Documents/Alba/inflammation/iscore/"#
+file <- "supp_table_11_adults.txt"#
+df.sig <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE)#
+#
+# Subset signature genes#
+    # Check if all relevant genes found#
+    sig.genes <- df.sig$Gene.name#
+    setdiff(sig.genes, df.feature$gene_short_name)
+head(df.sig)
+path <- "/Users/seanwen/Documents/Alba/inflammation/iscore/"#
+file <- "supp_table_11_adults.txt"#
+df.sig <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE)
+head(df.sig)
+path <- "/Users/seanwen/Documents/Alba/inflammation/iscore/"#
+file <- "supp_table_11_adults.txt"#
+df.sig <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE)
+# Subset signature genes#
+    # Check if all relevant genes found#
+    sig.genes <- df.sig$Gene.name#
+    setdiff(sig.genes, df.feature$gene_short_name) # All genes found#
+    # Annotate gene_id#
+    names(df.sig)[which(names(df.sig)=="Gene.name")] <- "gene_short_name"#
+    df.sig <- join(df.sig, df.feature[,c("gene_short_name", "gene_id")], by="gene_short_name", type="left")#
+    # Subset expression matrix#
+    df.small <- df[df.sig$gene_id, ]#
+#
+    # Replace gene ids w/ gene names#
+    table(row.names(df.small)==df.sig$gene_id)#
+    row.names(df.small) <- df.sig$gene_short_name#
+# Compute per-sample scores
+# Compute per-sample scores#
+results <- apply(df.small, 2, function(x) {x * df.sig$beta.mean})#
+results <- as.data.frame(results)#
+. <- colMeans(results)#
+results <- data.frame("patient.id"=names(.),#
+                      "iscore"=as.numeric(.),#
+                      stringsAsFactors=FALSE#
+                      )#
+fivenum(results$iscore)#
+#
+# Save file#
+path <- "/Users/seanwen/Documents/Alba/inflammation/iscore/tcga/"#
+file <- "per-patient_score.txt"#
+write.table(results, paste(path, file, sep=""), sep="\t", col.names=TRUE, row.names=FALSE, quote=FALSE)
+# Load packages#
+library(plyr)#
+library(survival)#
+library(survminer)#
+library(ggplot2)#
+#
+# Read patient-level file#
+df <- read.table("/Users/seanwen/Documents/Alba/data_check/Sources/TCGA/Master.txt", sep="\t", header=TRUE, stringsAsFactors=FALSE)
+# Remove entries with missing survival data#
+df <- df[which(!is.na(df$time)), ]#
+df <- df[which(!is.na(df$status)), ]#
+#
+# Annotate score#
+    # Read file#
+    path <- "/Users/seanwen/Documents/Alba/inflammation/iscore/tcga/"#
+    file <- "per-patient_score.txt"#
+    df.score <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE)#
+#
+    # Annotate#
+    df <- join(df, df.score, by="patient.id", type="left")#
+#
+    # Remove entries with missing expression data#
+    df <- df[which(!is.na(df$iscore)), ]#
+    dim(df)#
+#
+    # Binarize scorse#
+    df$score.bi <- ifelse(df$iscore < median(df$iscore), "low", "high")#
+    df$score.bi <- factor(df$score.bi, levels=c("low", "high"))#
+    table(df$score.bi)#
+#
+# Annotate age#
+    # Read file#
+    path <- "/Users/seanwen/Documents/Alba/data_check/01.Preprocessing/TCGA/Clinical/"#
+    file <- "Clinical.txt"#
+    df.clinical <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE)#
+#
+    # Annotate#
+    df <- join(df, df.clinical[,c("patient.id", "age_at_index")], by="patient.id", type="left")#
+    names(df)[which(names(df)=="age_at_index")] <- "age"#
+#
+##################################################################
+####################### ALL PATIENTS #############################
+##################################################################
+#
+# Cox proportional-hazards model#
+model <- coxph(Surv(time, status) ~ score.bi, data=df)#
+summary(model)
+# Model#
+    model <- survfit(Surv(time, status) ~ score.bi, data=df)#
+#
+    # Plot#
+    xmin <- 0 ; xmax <- ceiling(max(df$time, na.rm=TRUE))#
+    plot <- ggsurvplot(model,#
+                       data=df,#
+                       risk.table=TRUE,#
+                       palette=c("grey60","red3"),#
+                       xlim=c(xmin, xmax),#
+                       break.x.by=1,#
+                       fontsize=5,#
+                       ggtheme = theme_classic2(base_size=20))#
+#
+    # Save file#
+    path <- "/Users/seanwen/Documents/Alba/inflammation/iscore/tcga/"#
+    file <- "km_curve_all_patients.pdf"#
+#
+    pdf(paste(path, file, sep=""))#
+    print(plot, newpage=FALSE)#
+    dev.off()
+# Subset relevant age group#
+df.small <- df[which(df$age < 60), ]#
+#
+# Cox proportional-hazards model#
+model <- coxph(Surv(time, status) ~ score.bi, data=df.small)#
+summary(model)
+# Plot#
+    # Model#
+    model <- survfit(Surv(time, status) ~ score.bi, data=df.small)#
+#
+    # Plot#
+    xmin <- 0 ; xmax <- ceiling(max(df$time, na.rm=TRUE))#
+    plot <- ggsurvplot(model,#
+                       data=df,#
+                       risk.table=TRUE,#
+                       palette=c("grey60","red3"),#
+                       xlim=c(xmin, xmax),#
+                       break.x.by=1,#
+                       fontsize=5,#
+                       ggtheme = theme_classic2(base_size=20))#
+#
+    # Save file#
+    path <- "/Users/seanwen/Documents/Alba/inflammation/iscore/tcga/"#
+    file <- "km_curve_less_than_60yo.pdf"#
+#
+    pdf(paste(path, file, sep=""))#
+    print(plot, newpage=FALSE)#
+    dev.off()
+# Subset relevant age group#
+df.small <- df[which(df$age >= 60), ]#
+#
+# Cox proportional-hazards model#
+model <- coxph(Surv(time, status) ~ score.bi, data=df.small)#
+summary(model)
+# Subset relevant age group#
+df.small <- df[which(df$age >= 60), ]#
+#
+# Cox proportional-hazards model#
+model <- coxph(Surv(time, status) ~ score.bi, data=df.small)#
+summary(model) # HR: 1.4090, P: 0.276#
+#
+# Plot#
+    # Model#
+    model <- survfit(Surv(time, status) ~ score.bi, data=df.small)#
+#
+    # Plot#
+    xmin <- 0 ; xmax <- ceiling(max(df$time, na.rm=TRUE))#
+    plot <- ggsurvplot(model,#
+                       data=df,#
+                       risk.table=TRUE,#
+                       palette=c("grey60","red3"),#
+                       xlim=c(xmin, xmax),#
+                       break.x.by=1,#
+                       fontsize=5,#
+                       ggtheme = theme_classic2(base_size=20))#
+#
+    # Save file#
+    path <- "/Users/seanwen/Documents/Alba/inflammation/iscore/tcga/"#
+    file <- "km_curve_above_than_60yo.pdf"#
+#
+    pdf(paste(path, file, sep=""))#
+    print(plot, newpage=FALSE)#
+    dev.off()
+# Load packages#
+library(data.table)#
+library(plyr)#
+#
+# Read expression files#
+    # Matrix#
+    path <- "/Users/seanwen/Documents/Alba/data_check/01.Preprocessing/BeatAML/FPKM/"#
+    file <- "FPKM.txt"#
+    df <- as.data.frame(fread(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE))#
+    row.names(df) <- df$gene_id#
+    df$gene_id <- NULL#
+    # Gene metadata#
+    path <- "/Users/seanwen/Documents/Alba/data_check/01.Preprocessing/BeatAML/FPKM/"#
+    file <- "FPKM_featureData.txt"#
+    df.feature <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE)#
+    # Transform and censor values#
+    df <- log2(df + 1)#
+    df[df < 1] <- 0
+path <- "/Users/seanwen/Documents/Alba/inflammation/iscore/"#
+file <- "supp_table_11_adults.txt"#
+df.sig <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE)
+sig.genes <- df.sig$Gene.name#
+    setdiff(sig.genes, df.feature$gene_short_name)
+# Annotate gene_id#
+    names(df.sig)[which(names(df.sig)=="Gene.name")] <- "gene_short_name"#
+    df.sig <- join(df.sig, df.feature[,c("gene_short_name", "gene_id")], by="gene_short_name", type="left")#
+    # Subset expression matrix#
+    df.small <- df[df.sig$gene_id, ]#
+#
+    # Replace gene ids w/ gene names#
+    table(row.names(df.small)==df.sig$gene_id)#
+    row.names(df.small) <- df.sig$gene_short_name
+# Compute per-sample scores#
+results <- apply(df.small, 2, function(x) {x * df.sig$beta.mean})#
+results <- as.data.frame(results)#
+. <- colMeans(results)#
+results <- data.frame("patient.id"=names(.),#
+                      "iscore"=as.numeric(.),#
+                      stringsAsFactors=FALSE#
+                      )#
+fivenum(results$iscore)
+path <- "/Users/seanwen/Documents/Alba/inflammation/iscore/beataml/"#
+file <- "per-patient_score.txt"#
+write.table(results, paste(path, file, sep=""), sep="\t", col.names=TRUE, row.names=FALSE, quote=FALSE)
+# Load packages#
+library(plyr)#
+library(survival)#
+library(survminer)#
+library(ggplot2)#
+#
+# Read patient-level file#
+df <- read.table("/Users/seanwen/Documents/Alba/data_check/Sources/BeatAML/Master.txt", sep="\t", header=TRUE, stringsAsFactors=FALSE)#
+#
+# Remove entries with missing survival data#
+df <- df[which(!is.na(df$time)), ]#
+df <- df[which(!is.na(df$status)), ]
+# Annotate score#
+    # Read file#
+    path <- "/Users/seanwen/Documents/Alba/inflammation/iscore/beataml/"#
+    file <- "per-patient_score.txt"#
+    df.score <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE)#
+#
+    # Annotate#
+    df <- join(df, df.score, by="patient.id", type="left")#
+#
+    # Remove entries with missing expression data#
+    df <- df[which(!is.na(df$iscore)), ]#
+    dim(df)#
+#
+    # Binarize scorse#
+    df$score.bi <- ifelse(df$iscore < median(df$iscore), "low", "high")#
+    df$score.bi <- factor(df$score.bi, levels=c("low", "high"))#
+    table(df$score.bi)
+fivenum(df$iscore)
+# Read file#
+    path <- "/Users/seanwen/Documents/Alba/data_check/01.Preprocessing/BeatAML/Clinical/"#
+    file <- "Clinical.txt"#
+    df.clinical <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE)
+head(df.clinical)
+model <- coxph(Surv(time, status) ~ score.bi, data=df)#
+summary(model)
+# Model#
+    model <- survfit(Surv(time, status) ~ score.bi, data=df)
+xmin <- 0 ; xmax <- ceiling(max(df$time, na.rm=TRUE))#
+    plot <- ggsurvplot(model,#
+                       data=df,#
+                       risk.table=TRUE,#
+                       palette=c("grey60","red3"),#
+                       xlim=c(xmin, xmax),#
+                       break.x.by=1,#
+                       fontsize=5,#
+                       ggtheme = theme_classic2(base_size=20))
+# Save file#
+    path <- "/Users/seanwen/Documents/Alba/inflammation/iscore/beataml/"#
+    file <- "km_curve_all_patients.pdf"#
+#
+    pdf(paste(path, file, sep=""))#
+    print(plot, newpage=FALSE)#
+    dev.off()
+path <- "/Users/seanwen/Documents/IMPACT/BeatAML/Clinical/"#
+    file <- "Clinical_Patient_Collapsed.txt"#
+    df.clinical <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE)
+head(df.clinical)
+# Load packages#
+library(plyr)#
+library(data.table)#
+#
+# Read Vizome sample metadata (supp table no healthy donor anno)#
+path <- "/Users/seanwen/Documents/IMPACT/BeatAML/Metadata/"#
+file <- "Vizome_All_sample_data.csv"#
+df <- read.csv(paste(path, file, sep=""), header=TRUE, stringsAsFactors=FALSE, na.strings=c("NA", ""), skip=3)#
+#
+names(df)[which(names(df)=="LLS_PatientID")] <- "patient.id"#
+names(df)[which(names(df)=="LLS_SampleID")] <- "sample.id"#
+#
+# Annotate DNAseq data#
+    # Summarised#
+    path <- "/Users/seanwen/Documents/IMPACT/BeatAML/Genotype/TP53/"#
+    file <- "Genotype_Sample-Level.txt"#
+    df.geno <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE, quote="\"")#
+    df.geno$genotype <- TRUE#
+    # Annotate#
+    df <- join(df, df.geno[,c("sample.id", "genotype")], by="sample.id", type="left")#
+    df$genotype[is.na(df$genotype)] <- FALSE#
+# Annotate RNAseq data#
+    # Matrix#
+    path <- "/Users/seanwen/Documents/IMPACT/BeatAML/FPKM/"#
+    file <- "FPKM.txt"#
+    df.exp <- as.data.frame(fread(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE))#
+    df.exp <- data.frame("sample.id"=names(df.exp)[-1])#
+    df.exp$fpkm <- TRUE#
+#
+    # Annotate#
+    df <- join(df, df.exp[,c("sample.id", "fpkm")], by="sample.id", type="left")#
+    df$fpkm[is.na(df$fpkm)] <- FALSE#
+#
+#######################################################################
+########################## AML CLASSIFICATION #########################
+#######################################################################
+#
+# Recode "diagnosis at inclusion"#
+table(df$DxAtInclusion)#
+df$DxAtInclusion[which(df$DxAtInclusion=="ACUTE LEUKAEMIAS OF AMBIGUOUS LINEAGE")] <- "AML_NOS"#
+df$DxAtInclusion[which(df$DxAtInclusion=="ACUTE MYELOID LEUKAEMIA (AML) AND RELATED PRECURSOR NEOPLASMS")] <- "AML"#
+df$DxAtInclusion[grep("Healthy", df$DxAtInclusion)] <- "Healthy donor"#
+df$DxAtInclusion[grep("MYELODYSPLASTIC SYNDROMES", df$DxAtInclusion)] <- "MDS"#
+df$DxAtInclusion[grep("MYELODYSPLASTIC/MYELOPROLIFERATIVE NEOPLASMS", df$DxAtInclusion)] <- "MDS/MPN"#
+df$DxAtInclusion[grep("MYELOPROLIFERATIVE NEOPLASMS", df$DxAtInclusion)] <- "MPN"#
+sum(is.na(df$DxAtInclusion))#
+table(df$DxAtInclusion)#
+#
+# Indicate transformed (specific)/de nove cases#
+df$DxAtInclusion.2 <- df$DxAtInclusion#
+df$DxAtInclusion.2[which(df$PriorMDSMoreThanTwoMths=="y" & df$DxAtInclusion.2=="AML")] <- "AML_transformed_MDS"#
+df$DxAtInclusion.2[which(df$PriorMDSMPNMoreThanTwoMths=="y" & df$DxAtInclusion.2=="AML")] <- "AML_transformed_MDS/MPN"#
+df$DxAtInclusion.2[which(df$PriorMPNMoreThanTwoMths=="y" & df$DxAtInclusion.2=="AML")] <- "AML_transformed_MPN"#
+df$DxAtInclusion.2[which(df$PriorMDSMoreThanTwoMths=="n" & df$PriorMDSMPNMoreThanTwoMths=="n" & df$PriorMPNMoreThanTwoMths=="n" & df$DxAtInclusion.2=="AML")] <- "AML_de novo"#
+sum(is.na(df$DxAtInclusion.2))#
+table(df$DxAtInclusion.2)#
+#
+# Merged transformed MDS,MPN cases#
+df$DxAtInclusion.2[which(df$DxAtInclusion.2 %in% c("AML_transformed_MDS", "AML_transformed_MDS/MPN", "AML_transformed_MPN"))] <- "AML_transformed"#
+sum(is.na(df$DxAtInclusion.2))#
+table(df$DxAtInclusion.2) # Note down#
+#
+#######################################################################
+####################### FILTER SAMPLES/PATIENTS #######################
+#######################################################################
+#
+# Subset AML diagnosis#
+df <- df[which(df$DxAtInclusion.2 %in% c("AML_de novo", "AML_transformed")), ]#
+#
+# Subset samples collected at/near diagnosis#
+    # Convert to numeric#
+    df$TimeOfCollectionRelativeToInclusion <- as.numeric(df$TimeOfCollectionRelativeToInclusion)#
+    fivenum(df$TimeOfCollectionRelativeToInclusion)#
+    # Recode timeline#
+    df$TimeOfCollectionRelativeToInclusion.2 <- NA#
+    df$TimeOfCollectionRelativeToInclusion.2[which(df$TimeOfCollectionRelativeToInclusion==0)] <- "Same day"#
+    df$TimeOfCollectionRelativeToInclusion.2[which(is.na(df$TimeOfCollectionRelativeToInclusion.2) & df$TimeOfCollectionRelativeToInclusion <= 7)] <- ">1 day & <= 1 week"#
+    df$TimeOfCollectionRelativeToInclusion.2[which(is.na(df$TimeOfCollectionRelativeToInclusion.2) & df$TimeOfCollectionRelativeToInclusion <= 30)] <- ">1 week & <= 1 month"#
+    df$TimeOfCollectionRelativeToInclusion.2[which(is.na(df$TimeOfCollectionRelativeToInclusion.2) & df$TimeOfCollectionRelativeToInclusion <= 182.5)] <- ">1 month & <= 6 months"#
+    df$TimeOfCollectionRelativeToInclusion.2[which(is.na(df$TimeOfCollectionRelativeToInclusion.2) & df$TimeOfCollectionRelativeToInclusion <= 365)] <- ">6 month & <= 1 year"#
+    df$TimeOfCollectionRelativeToInclusion.2[which(is.na(df$TimeOfCollectionRelativeToInclusion.2) & df$TimeOfCollectionRelativeToInclusion > 365)] <- "> 1 year"#
+    table(df$TimeOfCollectionRelativeToInclusion.2)#
+    # Set factor levels#
+    df$TimeOfCollectionRelativeToInclusion.2 <- factor(df$TimeOfCollectionRelativeToInclusion.2, levels=c("Same day", ">1 day & <= 1 week", ">1 week & <= 1 month", ">1 month & <= 6 months", ">6 month & <= 1 year", "> 1 year"))#
+    table(df$TimeOfCollectionRelativeToInclusion.2) # Note down#
+    # Subset samples <1 month#
+    . <- c("Same day", ">1 day & <= 1 week", ">1 week & <= 1 month")#
+    df <- df[which(df$TimeOfCollectionRelativeToInclusion.2 %in% .), ]#
+#
+# Include samples with DNAseq and RNAseq measured at same time point#
+table(df$genotype, df$fpkm) # Note down#
+table(df$genotype)#
+table(df$fpkm)#
+df <- df[which(df$genotype==TRUE & df$fpkm==TRUE), ]#
+#
+# Indicate single/multi-sample patients#
+freq <- as.data.frame(table(df$patient.id))#
+names(freq) <- c("patient.id", "n.samples")#
+freq$n.samples.status <- NA#
+freq$n.samples.status[which(freq$n.samples == 1)] <- "One patient, one sample"#
+freq$n.samples.status[which(freq$n.samples > 1)] <- "One patient, multi sample"#
+df <- join(df, freq, by="patient.id", type="left")#
+table(freq$n.samples.status) # Note down#
+#
+# Sanity check#
+    # Blast counts: BM#
+    . <- as.numeric(df$PercentBlastsInBM[which(df$PercentBlastsInBM != "N/A")])#
+    sort(.)#
+    fivenum(.)#
+    # Blast counts: BM#
+    . <- as.numeric(df$PercentBlastsInPB[which(df$PercentBlastsInPB != "N/A")])#
+    sort(.)#
+    fivenum(.)#
+# Subset relevant columns#
+cols <- c("patient.id", "sample.id", "DxAtInclusion.2", "TimeOfCollectionRelativeToInclusion.2", "OverallSurvival", "VitalStatus", "genotype", "fpkm", "n.samples.status")#
+df <- df[, cols]
+# Load packages#
+library(plyr)#
+library(data.table)#
+#
+# Read Vizome sample metadata (supp table no healthy donor anno)#
+path <- "/Users/seanwen/Documents/IMPACT/BeatAML/Metadata/"#
+file <- "Vizome_All_sample_data.csv"#
+df <- read.csv(paste(path, file, sep=""), header=TRUE, stringsAsFactors=FALSE, na.strings=c("NA", ""), skip=3)#
+#
+names(df)[which(names(df)=="LLS_PatientID")] <- "patient.id"#
+names(df)[which(names(df)=="LLS_SampleID")] <- "sample.id"#
+#
+# Annotate DNAseq data#
+    # Summarised#
+    path <- "/Users/seanwen/Documents/IMPACT/BeatAML/Genotype/TP53/"#
+    file <- "Genotype_Sample-Level.txt"#
+    df.geno <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE, quote="\"")#
+    df.geno$genotype <- TRUE#
+    # Annotate#
+    df <- join(df, df.geno[,c("sample.id", "genotype")], by="sample.id", type="left")#
+    df$genotype[is.na(df$genotype)] <- FALSE#
+# Annotate RNAseq data#
+    # Matrix#
+    path <- "/Users/seanwen/Documents/IMPACT/BeatAML/FPKM/"#
+    file <- "FPKM.txt"#
+    df.exp <- as.data.frame(fread(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE))#
+    df.exp <- data.frame("sample.id"=names(df.exp)[-1])#
+    df.exp$fpkm <- TRUE#
+#
+    # Annotate#
+    df <- join(df, df.exp[,c("sample.id", "fpkm")], by="sample.id", type="left")#
+    df$fpkm[is.na(df$fpkm)] <- FALSE#
+#
+#######################################################################
+########################## AML CLASSIFICATION #########################
+#######################################################################
+#
+# Recode "diagnosis at inclusion"#
+table(df$DxAtInclusion)#
+df$DxAtInclusion[which(df$DxAtInclusion=="ACUTE LEUKAEMIAS OF AMBIGUOUS LINEAGE")] <- "AML_NOS"#
+df$DxAtInclusion[which(df$DxAtInclusion=="ACUTE MYELOID LEUKAEMIA (AML) AND RELATED PRECURSOR NEOPLASMS")] <- "AML"#
+df$DxAtInclusion[grep("Healthy", df$DxAtInclusion)] <- "Healthy donor"#
+df$DxAtInclusion[grep("MYELODYSPLASTIC SYNDROMES", df$DxAtInclusion)] <- "MDS"#
+df$DxAtInclusion[grep("MYELODYSPLASTIC/MYELOPROLIFERATIVE NEOPLASMS", df$DxAtInclusion)] <- "MDS/MPN"#
+df$DxAtInclusion[grep("MYELOPROLIFERATIVE NEOPLASMS", df$DxAtInclusion)] <- "MPN"#
+sum(is.na(df$DxAtInclusion))#
+table(df$DxAtInclusion)#
+#
+# Indicate transformed (specific)/de nove cases#
+df$DxAtInclusion.2 <- df$DxAtInclusion#
+df$DxAtInclusion.2[which(df$PriorMDSMoreThanTwoMths=="y" & df$DxAtInclusion.2=="AML")] <- "AML_transformed_MDS"#
+df$DxAtInclusion.2[which(df$PriorMDSMPNMoreThanTwoMths=="y" & df$DxAtInclusion.2=="AML")] <- "AML_transformed_MDS/MPN"#
+df$DxAtInclusion.2[which(df$PriorMPNMoreThanTwoMths=="y" & df$DxAtInclusion.2=="AML")] <- "AML_transformed_MPN"#
+df$DxAtInclusion.2[which(df$PriorMDSMoreThanTwoMths=="n" & df$PriorMDSMPNMoreThanTwoMths=="n" & df$PriorMPNMoreThanTwoMths=="n" & df$DxAtInclusion.2=="AML")] <- "AML_de novo"#
+sum(is.na(df$DxAtInclusion.2))#
+table(df$DxAtInclusion.2)#
+#
+# Merged transformed MDS,MPN cases#
+df$DxAtInclusion.2[which(df$DxAtInclusion.2 %in% c("AML_transformed_MDS", "AML_transformed_MDS/MPN", "AML_transformed_MPN"))] <- "AML_transformed"#
+sum(is.na(df$DxAtInclusion.2))#
+table(df$DxAtInclusion.2) # Note down#
+#
+#######################################################################
+####################### FILTER SAMPLES/PATIENTS #######################
+#######################################################################
+#
+# Subset AML diagnosis#
+df <- df[which(df$DxAtInclusion.2 %in% c("AML_de novo", "AML_transformed")), ]#
+#
+# Subset samples collected at/near diagnosis#
+    # Convert to numeric#
+    df$TimeOfCollectionRelativeToInclusion <- as.numeric(df$TimeOfCollectionRelativeToInclusion)#
+    fivenum(df$TimeOfCollectionRelativeToInclusion)#
+    # Recode timeline#
+    df$TimeOfCollectionRelativeToInclusion.2 <- NA#
+    df$TimeOfCollectionRelativeToInclusion.2[which(df$TimeOfCollectionRelativeToInclusion==0)] <- "Same day"#
+    df$TimeOfCollectionRelativeToInclusion.2[which(is.na(df$TimeOfCollectionRelativeToInclusion.2) & df$TimeOfCollectionRelativeToInclusion <= 7)] <- ">1 day & <= 1 week"#
+    df$TimeOfCollectionRelativeToInclusion.2[which(is.na(df$TimeOfCollectionRelativeToInclusion.2) & df$TimeOfCollectionRelativeToInclusion <= 30)] <- ">1 week & <= 1 month"#
+    df$TimeOfCollectionRelativeToInclusion.2[which(is.na(df$TimeOfCollectionRelativeToInclusion.2) & df$TimeOfCollectionRelativeToInclusion <= 182.5)] <- ">1 month & <= 6 months"#
+    df$TimeOfCollectionRelativeToInclusion.2[which(is.na(df$TimeOfCollectionRelativeToInclusion.2) & df$TimeOfCollectionRelativeToInclusion <= 365)] <- ">6 month & <= 1 year"#
+    df$TimeOfCollectionRelativeToInclusion.2[which(is.na(df$TimeOfCollectionRelativeToInclusion.2) & df$TimeOfCollectionRelativeToInclusion > 365)] <- "> 1 year"#
+    table(df$TimeOfCollectionRelativeToInclusion.2)#
+    # Set factor levels#
+    df$TimeOfCollectionRelativeToInclusion.2 <- factor(df$TimeOfCollectionRelativeToInclusion.2, levels=c("Same day", ">1 day & <= 1 week", ">1 week & <= 1 month", ">1 month & <= 6 months", ">6 month & <= 1 year", "> 1 year"))#
+    table(df$TimeOfCollectionRelativeToInclusion.2) # Note down#
+    # Subset samples <1 month#
+    . <- c("Same day", ">1 day & <= 1 week", ">1 week & <= 1 month")#
+    df <- df[which(df$TimeOfCollectionRelativeToInclusion.2 %in% .), ]#
+#
+# Include samples with DNAseq and RNAseq measured at same time point#
+table(df$genotype, df$fpkm) # Note down#
+table(df$genotype)#
+table(df$fpkm)#
+df <- df[which(df$genotype==TRUE & df$fpkm==TRUE), ]#
+#
+# Indicate single/multi-sample patients#
+freq <- as.data.frame(table(df$patient.id))#
+names(freq) <- c("patient.id", "n.samples")#
+freq$n.samples.status <- NA#
+freq$n.samples.status[which(freq$n.samples == 1)] <- "One patient, one sample"#
+freq$n.samples.status[which(freq$n.samples > 1)] <- "One patient, multi sample"#
+df <- join(df, freq, by="patient.id", type="left")#
+table(freq$n.samples.status) # Note down#
+#
+# Sanity check#
+    # Blast counts: BM#
+    . <- as.numeric(df$PercentBlastsInBM[which(df$PercentBlastsInBM != "N/A")])#
+    sort(.)#
+    fivenum(.)#
+    # Blast counts: BM#
+    . <- as.numeric(df$PercentBlastsInPB[which(df$PercentBlastsInPB != "N/A")])#
+    sort(.)#
+    fivenum(.)
+head(df)
+# Load packages#
+library(plyr)#
+library(survival)#
+library(survminer)#
+library(ggplot2)#
+#
+# Read patient-level file#
+df <- read.table("/Users/seanwen/Documents/Alba/data_check/Sources/BeatAML/Master.txt", sep="\t", header=TRUE, stringsAsFactors=FALSE)#
+#
+# Remove entries with missing survival data#
+df <- df[which(!is.na(df$time)), ]#
+df <- df[which(!is.na(df$status)), ]#
+#
+# Annotate score#
+    # Read file#
+    path <- "/Users/seanwen/Documents/Alba/inflammation/iscore/beataml/"#
+    file <- "per-patient_score.txt"#
+    df.score <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE)#
+#
+    # Annotate#
+    df <- join(df, df.score, by="patient.id", type="left")#
+#
+    # Remove entries with missing expression data#
+    df <- df[which(!is.na(df$iscore)), ]#
+    dim(df)#
+#
+    # Binarize scorse#
+    df$score.bi <- ifelse(df$iscore < median(df$iscore), "low", "high")#
+    df$score.bi <- factor(df$score.bi, levels=c("low", "high"))#
+    table(df$score.bi)
+# Read file#
+    path <- "/Users/seanwen/Documents/Alba/Manuscript/TP53/Data/raw/BeatAML/Clinical/"#
+    file <- "Clinical_AdditionalVariables.txt"#
+    df.clinical <- read.table(paste(path, file, sep=""), sep="\t", header=TRUE, stringsAsFactors=FALSE)#
+#
+    # Annotate#
+    df <- join(df, df.clinical[,c("patient.id", "ageAtDiagnosis")], by="patient.id", type="left")#
+    names(df)[which(names(df)=="ageAtDiagnosis")] <- "age"
+head(df)
+# Cox proportional-hazards model#
+model <- coxph(Surv(time, status) ~ score.bi, data=df)#
+summary(model)
+# Model#
+    model <- survfit(Surv(time, status) ~ score.bi, data=df)#
+#
+    # Plot#
+    xmin <- 0 ; xmax <- ceiling(max(df$time, na.rm=TRUE))#
+    plot <- ggsurvplot(model,#
+                       data=df,#
+                       risk.table=TRUE,#
+                       palette=c("grey60","red3"),#
+                       xlim=c(xmin, xmax),#
+                       break.x.by=1,#
+                       fontsize=5,#
+                       ggtheme = theme_classic2(base_size=20))#
+#
+    # Save file#
+    path <- "/Users/seanwen/Documents/Alba/inflammation/iscore/beataml/"#
+    file <- "km_curve_all_patients.pdf"#
+#
+    pdf(paste(path, file, sep=""))#
+    print(plot, newpage=FALSE)#
+    dev.off()
+# Subset relevant age group#
+df.small <- df[which(df$age < 60), ]#
+#
+# Cox proportional-hazards model#
+model <- coxph(Surv(time, status) ~ score.bi, data=df.small)#
+summary(model)
+# Plot#
+    # Model#
+    model <- survfit(Surv(time, status) ~ score.bi, data=df.small)#
+#
+    # Plot#
+    xmin <- 0 ; xmax <- ceiling(max(df$time, na.rm=TRUE))#
+    plot <- ggsurvplot(model,#
+                       data=df,#
+                       risk.table=TRUE,#
+                       palette=c("grey60","red3"),#
+                       xlim=c(xmin, xmax),#
+                       break.x.by=1,#
+                       fontsize=5,#
+                       ggtheme = theme_classic2(base_size=20))#
+#
+    # Save file#
+    path <- "/Users/seanwen/Documents/Alba/inflammation/iscore/beataml/"#
+    file <- "km_curve_less_than_60yo.pdf"#
+#
+    pdf(paste(path, file, sep=""))#
+    print(plot, newpage=FALSE)#
+    dev.off()
+# Subset relevant age group#
+df.small <- df[which(df$age >= 60), ]#
+#
+# Cox proportional-hazards model#
+model <- coxph(Surv(time, status) ~ score.bi, data=df.small)#
+summary(model)
+# Plot#
+    # Model#
+    model <- survfit(Surv(time, status) ~ score.bi, data=df.small)#
+#
+    # Plot#
+    xmin <- 0 ; xmax <- ceiling(max(df$time, na.rm=TRUE))#
+    plot <- ggsurvplot(model,#
+                       data=df,#
+                       risk.table=TRUE,#
+                       palette=c("grey60","red3"),#
+                       xlim=c(xmin, xmax),#
+                       break.x.by=1,#
+                       fontsize=5,#
+                       ggtheme = theme_classic2(base_size=20))#
+#
+    # Save file#
+    path <- "/Users/seanwen/Documents/Alba/inflammation/iscore/beataml/"#
+    file <- "km_curve_above_than_60yo.pdf"#
+#
+    pdf(paste(path, file, sep=""))#
+    print(plot, newpage=FALSE)#
+    dev.off()
+1488*7
+940/4
+749120/4
+796/4
+980/4
+192 *2
+19221+ 192
+setwd("/Users/seanwen/Documents/MARVEL/Github_WIMM/Wen_NucleicAcidsRes_2023/scripts/scripts_01_preprocess_singcellar/")
+# Load packages#
+library(SingCellaR)#
+library(plyr)#
+library(Matrix)#
+#
+# Load integrated R object#
+path <- "../../data/SingCellaR_output/integrated/"#
+file <- "Integrated_iPSC_CardioDay2_4_10.rdata"#
+load(file=paste(path, file, sep=""))#
+#
+##########################################################################
+#
+# Prepare phenoData#
+    # Merge sample,  cluster, metadata#
+    df.pheno <- object@meta.data#
+#
+    # Rename cell, donor id column#
+    names(df.pheno)[which(names(df.pheno)=="Cell")] <- "cell.id"#
+    names(df.pheno)[which(names(df.pheno)=="sampleID")] <- "donor.id"#
+    # Indicate cell type#
+    df.pheno$cell.type <- NA#
+    df.pheno$cell.type[grep("SRR9008754", df.pheno$donor.id)] <- "iPSC"#
+    df.pheno$cell.type[grep("SRR9008755", df.pheno$donor.id)] <- "Cardio day 2"#
+    df.pheno$cell.type[grep("SRR9008752", df.pheno$donor.id)] <- "Cardio day 4"#
+    df.pheno$cell.type[grep("SRR9008753", df.pheno$donor.id)] <- "Cardio day 10"#
+    table(df.pheno$cell.type, df.pheno$donor.id)#
+    # Subset relevant columns#
+    cols <- c("cell.id", "donor.id", "cell.type")#
+    df.pheno <- df.pheno[, cols]
+path <- "../../data/MARVEL_input/Gene_SingCellaR/"#
+    file <- "phenoData.txt"#
+    write.table(df.pheno, paste(path, file, sep=""), sep="\t", col.names=TRUE, row.names=FALSE, quote=FALSE)
+# Retrieve#
+    df.feature <- get_genes_metadata(object)#
+    # Create column for gene name#
+    df.feature$gene_short_name <- row.names(df.feature)#
+    df.feature <- df.feature[, "gene_short_name", drop=FALSE]#
+    row.names(df.feature) <- NULL#
+    # Save file#
+    path <- "../../data/MARVEL_input/Gene_SingCellaR/"#
+    file <- "featureData.txt"#
+    write.table(df.feature, paste(path, file, sep=""), sep="\t", col.names=TRUE, row.names=FALSE, quote=FALSE)#
+# Prepare matrix#
+    # Retrieve matrix#
+    df <- get_normalized_umi(object)#
+#
+    # Check alignmnet#
+    table(colnames(df)==df.pheno$cell.id)#
+    table(rownames(df)==df.feature$gene_short_name)#
+#
+    # Save file#
+    path <- "../../data/MARVEL_input/Gene_SingCellaR/"#
+    file <- "matrix_normalised.mtx"#
+    writeMM(df, file=paste(path, file, sep=""))
